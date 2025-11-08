@@ -9,17 +9,20 @@ from sklearn.metrics.pairwise import cosine_similarity
 # ---------------------------
 # Paths for your uploaded artifacts
 # ---------------------------
-ARTIFACTS_DIR = os.path.dirname(os.path.abspath(__file__))  # root of repo
+
+
+ARTIFACTS_DIR = os.path.join(os.path.dirname(__file__), "artifacts")
 
 FILES = {
-    "df": os.path.join(ARTIFACTS_DIR, "resume_dataframe.pkl.bz2"),  # compressed dataframe
+    "df": os.path.join(ARTIFACTS_DIR, "resume_dataframe.pkl.bz2"),
     "resume_embeddings": os.path.join(ARTIFACTS_DIR, "resume_embeddings.pkl"),
     "job_embeddings": os.path.join(ARTIFACTS_DIR, "job_embeddings.pkl"),
-    "embed_model_name": os.path.join(ARTIFACTS_DIR, "embed_model_name.pkl"),
     "faiss_index": os.path.join(ARTIFACTS_DIR, "faiss_resume_index.idx"),
     "faiss_meta": os.path.join(ARTIFACTS_DIR, "faiss_meta.pkl"),
-    "nn_index": os.path.join(ARTIFACTS_DIR, "nn_resume_index.pkl"),
+    "embed_model_name": os.path.join(ARTIFACTS_DIR, "embed_model_name.pkl"),
+    "nn_index": os.path.join(ARTIFACTS_DIR, "nn_resume_index.pkl")
 }
+
 
 # ---------------------------
 # Robust pickle / bz2 loader
