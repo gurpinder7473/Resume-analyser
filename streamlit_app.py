@@ -1,183 +1,248 @@
+# ---------------------------
+# Artifact download + robust loader (Google Drive)
+# ---------------------------
 import streamlit as st
-import pickle
-import os
-import requests
+import os, pickle, pandas as pd, requests, math
 import numpy as np
-import pandas as pd
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# -------------------------
-# CONFIG: ARTIFACT FOLDER & GOOGLE DRIVE FILE IDS
-# -------------------------
 ARTIFACTS_DIR = "artifacts"
 os.makedirs(ARTIFACTS_DIR, exist_ok=True)
 
-# Map filename -> Google Drive file id (use the IDs you uploaded)
+# ---------------------------
+# Put the Drive file IDs you already gave here.
+# If you upload nn_resume_index.pkl to Drive, add its file id to the dict.
+# ---------------------------
 FILE_IDS = {
     "resume_dataframe.pkl": "1715Wxq8_drtgL93vtedB-F_7gQznl6RT",
     "resume_embeddings.pkl": "12DsAMfvVjyZ7yuewebT7XwD0-jfcLpVL",
     "job_embeddings.pkl": "1SSm7k6wX9rSjpPhzO8tdRwOppy05iOky",
     "embed_model_name.pkl": "1q3h1JFJfpFmatWg1R-PxxDTa107OYzm_",
-    # If you have other files, add them here with the correct filenames as keys
-    # "some_other.pkl": "1A178G08uz0CSiUTRhAZVSsqxqbtDMl46",
-    # "extra_file.pkl": "1nvbnFAZrwRZM0w11rOUXMZACMN7QI7D3",
+    "faiss_meta.pkl": "1A178G08uz0CSiUTRhAZVSsqxqqbtDMl46"  # <-- double-check this id if needed
+    # NOTE: I put the IDs you provided earlier for the last two files below.
+    # If your faiss index file has the other id, switch them.
+    , "faiss_resume_index.idx": "1nvbnFAZrwRZM0w11rOUXMZACMN7QI7D3",
+    # Add nn_resume_index.pkl ID here if/when you upload it to Drive:
+    "nn_resume_index.pkl": ""  # <-- fill this with Drive file id if you upload it
 }
 
-# Local paths used by the rest of your code (kept names consistent)
+# Local paths used by your app
+DF_PATH = os.path.join(ARTIFACTS_DIR, "resume_dataframe.pkl")
 RESUME_EMB_PATH = os.path.join(ARTIFACTS_DIR, "resume_embeddings.pkl")
 JOB_EMB_PATH = os.path.join(ARTIFACTS_DIR, "job_embeddings.pkl")
-DF_PATH = os.path.join(ARTIFACTS_DIR, "resume_dataframe.pkl")
 MODEL_PATH = os.path.join(ARTIFACTS_DIR, "embed_model_name.pkl")
+FAISS_META_PATH = os.path.join(ARTIFACTS_DIR, "faiss_meta.pkl")
+FAISS_INDEX_PATH = os.path.join(ARTIFACTS_DIR, "faiss_resume_index.idx")
+NN_INDEX_PATH = os.path.join(ARTIFACTS_DIR, "nn_resume_index.pkl")
 
-# -------------------------
-# GOOGLE DRIVE DOWNLOADER
-# -------------------------
-def download_from_google_drive(file_id: str, destination: str):
-    """
-    Download a possibly-large file from Google Drive, handling the
-    'large file' confirmation token if required.
-    """
-    URL = "https://docs.google.com/uc?export=download"
+# ---------------------------
+# Helper: detect HTML (Drive error pages)
+# ---------------------------
+def is_probably_html(path):
+    try:
+        with open(path, "rb") as f:
+            head = f.read(2048)
+        txt = head.decode("utf-8", errors="ignore").lower()
+        return "<html" in txt or "google drive" in txt or "quota" in txt or "sign in" in txt
+    except Exception:
+        return False
+
+# ---------------------------
+# Robust Google Drive downloader (handles confirm token)
+# ---------------------------
+def download_from_gdrive(file_id: str, dest: str, show_progress=True):
+    if not file_id:
+        raise ValueError("No file_id provided for download.")
+
     session = requests.Session()
+    URL = "https://docs.google.com/uc?export=download"
     response = session.get(URL, params={'id': file_id}, stream=True)
     token = None
-    for key, val in response.cookies.items():
-        if key.startswith("download_warning"):
-            token = val
+    for k, v in response.cookies.items():
+        if k.startswith('download_warning') or 'download' in k:
+            token = v
             break
     if token:
         response = session.get(URL, params={'id': file_id, 'confirm': token}, stream=True)
 
-    CHUNK_SIZE = 32768
-    with open(destination, "wb") as f:
-        for chunk in response.iter_content(CHUNK_SIZE):
+    total = response.headers.get('Content-Length')
+    if total is not None:
+        total = int(total)
+
+    # write file with progress
+    chunk_size = 32768
+    written = 0
+    if show_progress and total:
+        prog = st.progress(0)
+    with open(dest, "wb") as f:
+        for chunk in response.iter_content(chunk_size):
             if chunk:
                 f.write(chunk)
+                written += len(chunk)
+                if show_progress and total:
+                    prog.progress(min(100, math.floor((written/total)*100)))
+    if show_progress and total:
+        prog.progress(100)
+    return dest
 
-def ensure_file_downloaded(filename: str):
-    """Ensure a specific artifact is present locally; download from Drive if missing."""
+# ---------------------------
+# Ensure a named artifact is present locally. Behavior:
+# - If file exists and looks valid -> use it
+# - If missing and a FILE_ID exists -> download
+# - If missing and no FILE_ID -> look in /mnt/data (dev/test) or raise
+# ---------------------------
+def ensure_artifact(filename, max_retries=2):
     local_path = os.path.join(ARTIFACTS_DIR, filename)
-    if os.path.exists(local_path):
+
+    # already present and looks ok
+    if os.path.exists(local_path) and not is_probably_html(local_path):
         return local_path
 
-    file_id = FILE_IDS.get(filename)
-    if not file_id:
-        # Not configured to download this file; caller should handle the missing file.
-        return None
+    file_id = FILE_IDS.get(filename, "") or ""
+    # try container upload locations first (useful in dev/testing)
+    alt_paths = [os.path.join("/mnt/data", filename), filename]  # check working dir too
+    for p in alt_paths:
+        if os.path.exists(p) and not is_probably_html(p):
+            # copy into artifacts dir for consistent behavior
+            try:
+                with open(p, "rb") as r, open(local_path, "wb") as w:
+                    w.write(r.read())
+                return local_path
+            except Exception:
+                pass
 
-    try:
-        st.info(f"Downloading {filename} from Google Drive (first-run)...")
-        download_from_google_drive(file_id, local_path)
-        st.success(f"{filename} downloaded.")
-        return local_path
-    except Exception as e:
-        st.error(f"Failed to download {filename}: {e}")
-        return None
-
-# Ensure required files exist locally (download if possible)
-# We'll attempt to ensure the DataFrame and model-name file, then try embeddings.
-ensure_file_downloaded("resume_dataframe.pkl")
-ensure_file_downloaded("embed_model_name.pkl")
-ensure_file_downloaded("resume_embeddings.pkl")
-ensure_file_downloaded("job_embeddings.pkl")  # optional; safe if missing
-
-# Show where artifacts are loaded from (useful debug)
-st.write("Using artifacts directory:", ARTIFACTS_DIR)
-st.write("Files present:", sorted(os.listdir(ARTIFACTS_DIR)))
-
-# -------------------------
-# CACHED LOADERS & FALLBACK EMBEDDING COMPUTE
-# -------------------------
-@st.cache_resource
-def get_model():
-    # Load model name from MODEL_PATH if present; otherwise default
-    model_name = "all-MiniLM-L6-v2"
-    if os.path.exists(MODEL_PATH):
-        try:
-            with open(MODEL_PATH, "rb") as f:
-                loaded = pickle.load(f)
-            if isinstance(loaded, str):
-                model_name = loaded
+    # if we have a drive id, attempt download (with retries if we detect html)
+    if file_id:
+        for attempt in range(max_retries):
+            try:
+                download_from_gdrive(file_id, local_path, show_progress=True)
+            except Exception as e:
+                st.warning(f"Download attempt {attempt+1} for {filename} failed: {e}")
+                continue
+            if os.path.exists(local_path) and not is_probably_html(local_path):
+                return local_path
             else:
-                # if it was stored differently (e.g., bytes), attempt str conversion
-                model_name = str(loaded)
-        except Exception:
-            # fallback to default
-            model_name = "all-MiniLM-L6-v2"
-    return SentenceTransformer(model_name)
+                st.warning(f"Downloaded file for {filename} looks invalid (HTML). Retrying...")
+        # exhausted retries
+        st.error(f"Could not obtain a valid copy of {filename} from Drive after {max_retries} attempts.")
+        return None
 
-@st.cache_data
-def load_dataframe(path):
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"DataFrame file not found at {path}")
-    return pd.read_pickle(path)
+    # no drive id and not found
+    st.warning(f"No Drive ID for {filename} and file not present locally.")
+    return None
 
-@st.cache_data
-def load_or_build_embeddings(df, emb_path, model):
-    # If embeddings file exists, load it; otherwise compute from df and save
-    if os.path.exists(emb_path):
-        with open(emb_path, "rb") as f:
-            return pickle.load(f)
+# ---------------------------
+# Robust pickle loader (DataFrame, embeddings, other pickled objects)
+# ---------------------------
+def robust_load_pickle(local_path, expected_type=None):
+    if local_path is None:
+        raise FileNotFoundError("Provided path is None")
 
-    # Compute embeddings (expects df to have a 'resume_text' column)
-    if "resume_text" not in df.columns:
-        raise ValueError("DataFrame must contain a 'resume_text' column to build embeddings.")
-    st.info("Resume embeddings missing — computing embeddings now (first-run, may take time)...")
-    texts = df["resume_text"].astype(str).tolist()
-    emb = model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
-    with open(emb_path, "wb") as f:
-        pickle.dump(emb, f)
-    st.success("Resume embeddings computed and saved.")
-    return emb
+    if not os.path.exists(local_path):
+        raise FileNotFoundError(local_path + " not found")
 
-# -------------------------
-# LOAD ARTIFACTS (keeps original logic)
-# -------------------------
-st.set_page_config(page_title="Resume Matcher", layout="wide")
+    # detect html
+    if is_probably_html(local_path):
+        raise RuntimeError(f"{local_path} appears to be an HTML page (Drive error).")
 
+    # try pandas pickles first (fast path for DataFrame)
+    try:
+        obj = pd.read_pickle(local_path)
+    except Exception:
+        # fallback to plain pickle.load (latin1 for py2->py3 compatibility)
+        with open(local_path, "rb") as f:
+            obj = pickle.load(f, encoding="latin1")
+    if expected_type and not isinstance(obj, expected_type):
+        st.warning(f"Expected {expected_type} but got {type(obj)} when loading {local_path}")
+    return obj
+
+# ---------------------------
+# Load FAISS index if present
+# ---------------------------
+def load_faiss_index(index_path):
+    try:
+        import faiss
+    except Exception as e:
+        st.error("faiss is not available in the environment. faiss-cpu must be installed in requirements.")
+        raise e
+    if not os.path.exists(index_path):
+        raise FileNotFoundError(index_path + " not found")
+    # faiss.read_index works with the index file path
+    return faiss.read_index(index_path)
+
+# ---------------------------
+# Main cached loader used by the rest of your app
+# ---------------------------
 @st.cache_resource
 def load_artifacts():
-    # DataFrame
-    if not os.path.exists(DF_PATH):
-        # try to download if not present
-        ensure_file_downloaded("resume_dataframe.pkl")
-    df = load_dataframe(DF_PATH)
+    # Ensure and load DataFrame
+    df_local = ensure_artifact("resume_dataframe.pkl")
+    if not df_local:
+        st.error("resume_dataframe.pkl missing — upload to Drive or place in artifacts/")
+        raise FileNotFoundError("resume_dataframe.pkl missing")
+    df = robust_load_pickle(df_local, expected_type=pd.DataFrame)
 
-    # Model
-    model = get_model()
+    # Embeddings (numpy array)
+    emb_local = ensure_artifact("resume_embeddings.pkl")
+    if not emb_local:
+        st.error("resume_embeddings.pkl missing — upload to Drive or place in artifacts/")
+        raise FileNotFoundError("resume_embeddings.pkl missing")
+    resume_embeddings = robust_load_pickle(emb_local)  # may be numpy array or list
 
-    # Embeddings: attempt download, else compute
-    if not os.path.exists(RESUME_EMB_PATH):
-        ensure_file_downloaded("resume_embeddings.pkl")
-    resume_embeddings_local = load_or_build_embeddings(df, RESUME_EMB_PATH, model)
+    # Optional: job embeddings
+    job_emb_local = ensure_artifact("job_embeddings.pkl")
+    job_embeddings = None
+    if job_emb_local:
+        job_embeddings = robust_load_pickle(job_emb_local)
 
-    return df, resume_embeddings_local, model
+    # FAISS meta & index (optional)
+    faiss_meta_local = ensure_artifact("faiss_meta.pkl")
+    faiss_index_local = ensure_artifact("faiss_resume_index.idx")
+    faiss_index = None
+    if faiss_index_local:
+        try:
+            faiss_index = load_faiss_index(faiss_index_local)
+        except Exception as e:
+            st.warning(f"Failed to load faiss index: {e}")
 
-# Keep the rest of your app logic unchanged
-df, resume_embeddings, model = load_artifacts()
+    # NN index (pickled nearest-neighbor index, optional)
+    nn_local = ensure_artifact("nn_resume_index.pkl")
+    nn_index = None
+    if nn_local:
+        try:
+            nn_index = robust_load_pickle(nn_local)
+        except Exception as e:
+            st.warning(f"Failed to load nn_resume_index.pkl: {e}")
 
-st.title("📄 Resume Matcher — AI Job Resume Screening")
-st.markdown("Upload or paste your **Job Description**, and the app will show the most relevant resumes.")
+    # Model name / embedding model
+    model_name_local = ensure_artifact("embed_model_name.pkl")
+    if model_name_local:
+        try:
+            model_name_obj = robust_load_pickle(model_name_local)
+            # model_name might be stored as string or inside container; guard it
+            if isinstance(model_name_obj, str):
+                model_name = model_name_obj
+            elif isinstance(model_name_obj, (list, tuple)) and len(model_name_obj) > 0:
+                model_name = str(model_name_obj[0])
+            else:
+                model_name = "all-MiniLM-L6-v2"
+        except Exception:
+            model_name = "all-MiniLM-L6-v2"
+    else:
+        model_name = "all-MiniLM-L6-v2"
 
-job_desc = st.text_area("📝 Job Description", height=200, placeholder="Paste job description here...")
-top_k = st.slider("Select number of top resumes to show", 1, 20, 5)
-search_button = st.button("🔍 Find Matching Resumes")
+    st.write(f"Using sentence-transformers model: {model_name}")
+    model = SentenceTransformer(model_name)
 
-if search_button and job_desc.strip():
-    with st.spinner("Encoding job description and finding matches..."):
-        job_emb = model.encode([job_desc], convert_to_numpy=True)
-        sims = cosine_similarity(job_emb, resume_embeddings)[0]
-        top_idx = np.argsort(-sims)[:top_k]
-        results = [(int(i), float(sims[i]), df.iloc[i]['resume_text'][:1500]) for i in top_idx]
-
-    st.success(f"Found Top {top_k} Matching Resumes")
-    for rank, (idx, score, text) in enumerate(results, start=1):
-        st.markdown(f"### #{rank} — Similarity Score: {score:.4f}")
-        st.write(text)
-        st.divider()
-elif search_button:
-    st.warning("Please enter a valid job description.")
-
-st.sidebar.title("ℹ️ About")
-st.sidebar.info("This app uses **SentenceTransformer** embeddings to compute similarity between resumes and job descriptions.")
+    # Return a dict with everything; your original code expects df, resume_embeddings, model
+    return {
+        "df": df,
+        "resume_embeddings": resume_embeddings,
+        "job_embeddings": job_embeddings,
+        "faiss_index": faiss_index,
+        "faiss_meta_path": faiss_meta_local,
+        "nn_index": nn_index,
+        "model": model
+    }
+# End of artifact loader
