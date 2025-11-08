@@ -1,16 +1,13 @@
 import streamlit as st
-import os
-import pickle
 import pandas as pd
 import numpy as np
+import pickle
+import bz2
+import os
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# ---------------------------
-# Paths for your uploaded artifacts
-# ---------------------------
-
-
+# --- Artifact paths ---
 ARTIFACTS_DIR = os.path.join(os.path.dirname(__file__), "artifacts")
 
 FILES = {
@@ -20,86 +17,48 @@ FILES = {
     "faiss_index": os.path.join(ARTIFACTS_DIR, "faiss_resume_index.idx"),
     "faiss_meta": os.path.join(ARTIFACTS_DIR, "faiss_meta.pkl"),
     "embed_model_name": os.path.join(ARTIFACTS_DIR, "embed_model_name.pkl"),
-    "nn_index": os.path.join(ARTIFACTS_DIR, "nn_resume_index.pkl")
+    "nn_index": os.path.join(ARTIFACTS_DIR, "nn_resume_index.pkl"),
 }
 
+# --- Helper functions ---
+def load_pickle(path):
+    with open(path, "rb") as f:
+        return pickle.load(f)
 
-# ---------------------------
-# Robust pickle / bz2 loader
-# ---------------------------
-def robust_load(path, expected_type=None):
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"{path} not found")
-
-    try:
-        # pandas can handle bz2 compressed pickles directly
-        obj = pd.read_pickle(path)
-    except Exception:
+def load_dataframe(path):
+    if path.endswith(".bz2"):
+        with bz2.BZ2File(path, "rb") as f:
+            return pickle.load(f)
+    else:
         with open(path, "rb") as f:
-            obj = pickle.load(f, encoding="latin1")
+            return pickle.load(f)
 
-    if expected_type and not isinstance(obj, expected_type):
-        st.warning(f"Expected {expected_type} but got {type(obj)} for {path}")
-    return obj
-
-# ---------------------------
-# Load FAISS index
-# ---------------------------
-def load_faiss_index(path):
-    import faiss
-    if not os.path.exists(path):
-        return None
-    try:
-        return faiss.read_index(path)
-    except Exception as e:
-        st.warning(f"Failed to load FAISS index: {e}")
-        return None
-
-# ---------------------------
-# Main artifact loader
-# ---------------------------
 @st.cache_resource
 def load_artifacts():
-    # DataFrame
-    df = robust_load(FILES["df"], pd.DataFrame)
+    # Load DataFrame
+    df = load_dataframe(FILES["df"])
 
-    # Embeddings
-    resume_embeddings = robust_load(FILES["resume_embeddings"])
-    job_embeddings = None
-    if os.path.exists(FILES["job_embeddings"]):
-        job_embeddings = robust_load(FILES["job_embeddings"])
-
-    # FAISS + NN indices
-    faiss_index = load_faiss_index(FILES["faiss_index"])
-    nn_index = None
-    if os.path.exists(FILES["nn_index"]):
-        nn_index = robust_load(FILES["nn_index"])
-
-    # Model
-    try:
-        model_name_obj = robust_load(FILES["embed_model_name"])
-        if isinstance(model_name_obj, str):
-            model_name = model_name_obj
-        elif isinstance(model_name_obj, (list, tuple)) and model_name_obj:
-            model_name = model_name_obj[0]
-        else:
-            model_name = "all-MiniLM-L6-v2"
-    except Exception:
-        model_name = "all-MiniLM-L6-v2"
-
-    st.write(f"✅ Using model: {model_name}")
+    # Load model name and initialize SentenceTransformer
+    model_name = load_pickle(FILES["embed_model_name"])
     model = SentenceTransformer(model_name)
+
+    # Load embeddings
+    resume_embeddings = load_pickle(FILES["resume_embeddings"])
 
     return df, resume_embeddings, model
 
-# ---------------------------
-# Load artifacts and run app
-# ---------------------------
-df, resume_embeddings, model = load_artifacts()
-
+# --- Load everything ---
 st.title("📄 Resume Matcher — AI Job Resume Screening")
 st.markdown("Upload or paste your **Job Description**, and the app will show the most relevant resumes.")
 
+try:
+    df, resume_embeddings, model = load_artifacts()
+    st.sidebar.success("✅ Artifacts loaded successfully.")
+except Exception as e:
+    st.sidebar.error(f"❌ Error loading artifacts: {e}")
+    st.stop()
+
+# --- App logic ---
 job_desc = st.text_area("📝 Job Description", height=200, placeholder="Paste job description here...")
 top_k = st.slider("Select number of top resumes to show", 1, 20, 5)
 search_button = st.button("🔍 Find Matching Resumes")
