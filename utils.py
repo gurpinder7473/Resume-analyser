@@ -5,6 +5,7 @@ import pickle
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
+
 def load_pickle(path):
     """Loads pickle file safely"""
     with open(path, "rb") as f:
@@ -26,13 +27,13 @@ def load_artifacts(artifacts_dir="artifacts"):
 
     print(f"📂 Loading artifacts from: {artifacts_dir}")
 
-    # ========== Required Artifacts (must exist) ==========
+    # ---------- Required files ----------
     df_path = os.path.join(artifacts_dir, "resume_dataframe.pkl")
     resume_emb_path = os.path.join(artifacts_dir, "resume_embeddings.pkl")
     job_emb_path = os.path.join(artifacts_dir, "job_embeddings.pkl")
     model_name_path = os.path.join(artifacts_dir, "embed_model_name.pkl")
 
-    # ========== Optional (FAISS / sklearn) ==========
+    # ---------- Optional files ----------
     nn_path = os.path.join(artifacts_dir, "nn_resume_index.pkl")
     faiss_idx_path = os.path.join(artifacts_dir, "faiss_resume_index.idx")
     faiss_meta_path = os.path.join(artifacts_dir, "faiss_meta.pkl")
@@ -41,27 +42,31 @@ def load_artifacts(artifacts_dir="artifacts"):
     df = load_pickle(df_path)
     resume_embeddings = load_pickle(resume_emb_path)
 
-    # Job embedding may not exist if mode = resume-only matching
+    # Optional job embeddings (if multi-job mode enabled)
     job_embeddings = None
     if os.path.exists(job_emb_path):
         job_embeddings = load_pickle(job_emb_path)
 
-    # Load model and initialize
+    # Load embed model
     model_name = load_pickle(model_name_path)
     model = SentenceTransformer(model_name)
 
-    # Load optional sklearn NN
+    # Optional sklearn NearestNeighbors index
     sklearn_nn = None
     if os.path.exists(nn_path):
         sklearn_nn = load_pickle(nn_path)
 
-    # Load FAISS index if exists
+    # Optional FAISS index
     faiss_index = None
     faiss_meta = None
     if os.path.exists(faiss_idx_path) and os.path.exists(faiss_meta_path):
-        import faiss
-        faiss_index = faiss.read_index(faiss_idx_path)
-        faiss_meta = load_pickle(faiss_meta_path)
+        try:
+            import faiss
+            faiss_index = faiss.read_index(faiss_idx_path)
+            faiss_meta = load_pickle(faiss_meta_path)
+        except Exception as e:
+            print(f"⚠️ FAISS could not be loaded: {e}")
+            faiss_index = None
+            faiss_meta = None
 
     return df, resume_embeddings, job_embeddings, model, faiss_index, sklearn_nn, faiss_meta
-
