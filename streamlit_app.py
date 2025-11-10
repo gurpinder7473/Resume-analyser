@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import pickle
-import bz2
 import os
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -11,7 +10,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 ARTIFACTS_DIR = os.path.join(os.path.dirname(__file__), "artifacts")
 
 FILES = {
-    "df": os.path.join(ARTIFACTS_DIR, "resume_dataframe.pkl.bz2"),
+    "df": os.path.join(ARTIFACTS_DIR, "resume_dataframe.pkl"),  # ✅ Updated
     "resume_embeddings": os.path.join(ARTIFACTS_DIR, "resume_embeddings.pkl"),
     "job_embeddings": os.path.join(ARTIFACTS_DIR, "job_embeddings.pkl"),
     "faiss_index": os.path.join(ARTIFACTS_DIR, "faiss_resume_index.idx"),
@@ -25,18 +24,10 @@ def load_pickle(path):
     with open(path, "rb") as f:
         return pickle.load(f)
 
-def load_dataframe(path):
-    if path.endswith(".bz2"):
-        with bz2.BZ2File(path, "rb") as f:
-            return pickle.load(f)
-    else:
-        with open(path, "rb") as f:
-            return pickle.load(f)
-
 @st.cache_resource
 def load_artifacts():
     # Load DataFrame
-    df = load_dataframe(FILES["df"])
+    df = load_pickle(FILES["df"])  # ✅ Direct pkl loading
 
     # Load model name and initialize SentenceTransformer
     model_name = load_pickle(FILES["embed_model_name"])
@@ -46,6 +37,7 @@ def load_artifacts():
     resume_embeddings = load_pickle(FILES["resume_embeddings"])
 
     return df, resume_embeddings, model
+
 
 # --- Load everything ---
 st.title("📄 Resume Matcher — AI Job Resume Screening")
@@ -57,6 +49,7 @@ try:
 except Exception as e:
     st.sidebar.error(f"❌ Error loading artifacts: {e}")
     st.stop()
+
 
 # --- App logic ---
 job_desc = st.text_area("📝 Job Description", height=200, placeholder="Paste job description here...")
